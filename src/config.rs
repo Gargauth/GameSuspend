@@ -1,0 +1,223 @@
+//! `settings.ini` next to the executable: defaults, parsing and validation.
+
+use std::collections::HashMap;
+use std::path::Path;
+
+/// Written when `settings.ini` does not exist yet.
+pub const DEFAULT_INI: &str = "\
+; GameSuspend - nastavení. Po změně použij „Znovu načíst nastavení“ v menu ikony v oznamovací oblasti.\r
+\r
+[Hotkeys]\r
+; Syntaxe jako v AutoHotkey: ^ = Ctrl, ! = Alt, + = Shift, # = Win\r
+; Klávesy: Pause, ScrollLock, F1-F24, Insert, Home, End, PgUp, PgDn, A-Z, 0-9,\r
+; Numpad0-9, ... nebo kód virtuální klávesy jako vk13.\r
+ToggleKey=Pause\r
+EmergencyKey=^!Pause\r
+\r
+[Timing]\r
+; Pauza mezi minimalizací okna a uspáním procesu (ms, 0-10000).\r
+; Kratší = rychlejší, ale hra nemusí stihnout dokončit minimalizaci\r
+; a odchod z fullscreenu - pak se po probuzení sekne.\r
+MinimizeDelayMs=350\r
+; Pauza mezi probuzením procesu a obnovením okna (ms, 0-10000).\r
+ResumeDelayMs=250\r
+\r
+[Behavior]\r
+; 1 = minimalizovat okno před uspáním (doporučeno, uvolní obrazovku\r
+;     a u exclusive fullscreen vrátí plochu). 0 = nechat okno být.\r
+MinimizeWindow=1\r
+; 1 = zobrazovat oznámení, 0 = pracovat potichu.\r
+ShowTrayTips=1\r
+\r
+[Blacklist]\r
+; Další procesy, které se nikdy nesmí uspat, oddělené čárkou.\r
+; Systémové procesy (explorer.exe, dwm.exe, csrss.exe, ...) jsou\r
+; zablokované napevno v programu a tenhle seznam je jen rozšiřuje.\r
+Extra=\r
+";
+
+const MAX_DELAY_MS: u32 = 10_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Config {
+    pub toggle_key: String,
+    pub emergency_key: String,
+    pub minimize_delay_ms: u32,
+    pub resume_delay_ms: u32,
+    pub minimize_window: bool,
+    pub show_tray_tips: bool,
+    /// Lowercased executable names.
+    pub extra_blacklist: Vec<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            toggle_key: "Pause".into(),
+            emergency_key: "^!Pause".into(),
+            minimize_delay_ms: 350,
+            resume_delay_ms: 250,
+            minimize_window: true,
+            show_tray_tips: true,
+            extra_blacklist: Vec::new(),
+        }
+    }
+}
+
+impl Config {
+    /// Loads `path`, creating it with [`DEFAULT_INI`] when missing.
+    /// An unreadable file yields the defaults so the app always starts.
+    pub fn load_or_create(path: &Path) -> Config {
+        match std::fs::read(path) {
+            Ok(bytes) => Config::parse(&decode(&bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let _ = std::fs::write(path, DEFAULT_INI);
+                Config::default()
+            }
+            Err(_) => Config::default(),
+        }
+    }
+
+    /// Missing or invalid values fall back to their defaults individually.
+    pub fn parse(text: &str) -> Config {
+        let ini = Ini::parse(text);
+        let def = Config::default();
+        let text_or = |section, key, default: String| match ini.get(section, key) {
+            Some(v) if !v.is_empty() => v.to_string(),
+            _ => default,
+        };
+        let delay_or = |section, key, default| {
+            ini.get(section, key)
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|&v| v <= MAX_DELAY_MS)
+                .unwrap_or(default)
+        };
+        let flag_or = |section, key, default| {
+            ini.get(section, key)
+                .and_then(|v| v.parse::<i64>().ok())
+                .map_or(default, |v| v != 0)
+        };
+
+        Config {
+            toggle_key: text_or("hotkeys", "togglekey", def.toggle_key),
+            emergency_key: text_or("hotkeys", "emergencykey", def.emergency_key),
+            minimize_delay_ms: delay_or("timing", "minimizedelayms", def.minimize_delay_ms),
+            resume_delay_ms: delay_or("timing", "resumedelayms", def.resume_delay_ms),
+            minimize_window: flag_or("behavior", "minimizewindow", def.minimize_window),
+            show_tray_tips: flag_or("behavior", "showtraytips", def.show_tray_tips),
+            extra_blacklist: ini
+                .get("blacklist", "extra")
+                .unwrap_or("")
+                .split(',')
+                .map(|name| name.trim().to_lowercase())
+                .filter(|name| !name.is_empty())
+                .collect(),
+        }
+    }
+}
+
+/// Accepts UTF-8 (with or without BOM) and UTF-16 LE with BOM, which is what
+/// Notepad produces for "Unicode".
+fn decode(bytes: &[u8]) -> String {
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        let units: Vec<u16> = rest
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| u16::from_le_bytes(c))
+            .collect();
+        return String::from_utf16_lossy(&units);
+    }
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Minimal INI reader with `GetPrivateProfileString` semantics: case-insensitive
+/// section and key names, trimmed values, first occurrence wins, `;`/`#` comments.
+struct Ini(HashMap<(String, String), String>);
+
+impl Ini {
+    fn parse(text: &str) -> Ini {
+        let mut map = HashMap::new();
+        let mut section = String::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+                continue;
+            }
+            if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                section = name.trim().to_lowercase();
+            } else if let Some((key, value)) = line.split_once('=') {
+                map.entry((section.clone(), key.trim().to_lowercase()))
+                    .or_insert_with(|| value.trim().to_string());
+            }
+        }
+        Ini(map)
+    }
+
+    fn get(&self, section: &str, key: &str) -> Option<&str> {
+        self.0
+            .get(&(section.to_string(), key.to_string()))
+            .map(String::as_str)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_ini_parses_to_defaults() {
+        assert_eq!(Config::parse(DEFAULT_INI), Config::default());
+    }
+
+    #[test]
+    fn reads_values_case_insensitively_and_trimmed() {
+        let cfg = Config::parse(
+            "[HOTKEYS]\nTOGGLEKEY =  F9 \n[timing]\nminimizedelayms=0\nResumeDelayMs=10000\n\
+             [Behavior]\nMinimizeWindow=0\nShowTrayTips=0\n",
+        );
+        assert_eq!(cfg.toggle_key, "F9");
+        assert_eq!(cfg.emergency_key, "^!Pause");
+        assert_eq!(cfg.minimize_delay_ms, 0);
+        assert_eq!(cfg.resume_delay_ms, 10_000);
+        assert!(!cfg.minimize_window);
+        assert!(!cfg.show_tray_tips);
+    }
+
+    #[test]
+    fn invalid_or_out_of_range_values_fall_back_to_defaults() {
+        let cfg = Config::parse(
+            "[Hotkeys]\nToggleKey=\n[Timing]\nMinimizeDelayMs=-5\nResumeDelayMs=10001\n\
+             [Behavior]\nMinimizeWindow=yes\n",
+        );
+        assert_eq!(cfg.toggle_key, "Pause");
+        assert_eq!(cfg.minimize_delay_ms, 350);
+        assert_eq!(cfg.resume_delay_ms, 250);
+        assert!(cfg.minimize_window);
+    }
+
+    #[test]
+    fn keys_outside_their_section_are_ignored_and_first_occurrence_wins() {
+        let cfg = Config::parse("ToggleKey=F1\n[Hotkeys]\nToggleKey=F2\nToggleKey=F3\n");
+        assert_eq!(cfg.toggle_key, "F2");
+    }
+
+    #[test]
+    fn extra_blacklist_is_split_trimmed_and_lowercased() {
+        let cfg = Config::parse("[Blacklist]\nExtra= Discord.exe ,, OBS64.EXE,\n");
+        assert_eq!(cfg.extra_blacklist, ["discord.exe", "obs64.exe"]);
+    }
+
+    #[test]
+    fn decodes_utf8_bom_and_utf16le() {
+        let text = "[Hotkeys]\r\nToggleKey=F8\r\n";
+        let mut utf8 = vec![0xEF, 0xBB, 0xBF];
+        utf8.extend_from_slice(text.as_bytes());
+        let mut utf16 = vec![0xFF, 0xFE];
+        utf16.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        for bytes in [utf8, utf16] {
+            assert_eq!(Config::parse(&decode(&bytes)).toggle_key, "F8");
+        }
+    }
+}

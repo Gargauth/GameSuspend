@@ -1,0 +1,46 @@
+name: Release
+
+# Push a tag matching the version in Cargo.toml, e.g. `git tag v1.0.0 && git push origin v1.0.0`.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup update stable --no-self-update && rustup default stable
+
+      - name: Check tag matches Cargo.toml version
+        shell: bash
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/gamesuspend.exe dist/GameSuspend.exe
+          $hash = (Get-FileHash dist/GameSuspend.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  GameSuspend.exe" | Out-File dist/SHA256SUMS.txt -Encoding ascii
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create $env:GITHUB_REF_NAME
+          dist/GameSuspend.exe dist/SHA256SUMS.txt
+          --title "GameSuspend $env:GITHUB_REF_NAME"
+          --generate-notes
