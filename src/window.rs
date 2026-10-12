@@ -1,14 +1,21 @@
-//! Foreground window queries, minimize/restore and message boxes.
+//! Window helpers: foreground window queries, minimize/restore, message boxes,
+//! icons and opening files.
 //!
 //! Window state changes use `ShowWindowAsync`: a synchronous `ShowWindow` on a
 //! window of another process waits until that process handles the message, which
 //! a suspended or hung game never does.
 
+use std::path::Path;
+
 use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsZoomed,
-    MB_ICONERROR, MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MessageBoxW, SW_MAXIMIZE, SW_MINIMIZE,
-    SW_RESTORE, SetForegroundWindow, ShowWindowAsync,
+    GetForegroundWindow, GetSystemMetrics, GetWindowTextW, GetWindowThreadProcessId, HICON, IDYES,
+    IMAGE_ICON, IsIconic, IsWindow, IsZoomed, LR_DEFAULTCOLOR, LoadImageW, MB_DEFBUTTON2,
+    MB_ICONERROR, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MB_YESNO,
+    MESSAGEBOX_STYLE, MessageBoxW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SW_MAXIMIZE,
+    SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindowAsync,
 };
 
 use crate::wide;
@@ -35,9 +42,9 @@ impl Placement {
 
     pub fn label(self) -> &'static str {
         match self {
-            Placement::Minimized => "minimalizované",
-            Placement::Normal => "normální",
-            Placement::Maximized => "maximalizované",
+            Placement::Minimized => "minimized",
+            Placement::Normal => "normal",
+            Placement::Maximized => "maximized",
         }
     }
 }
@@ -81,16 +88,59 @@ pub fn restore(hwnd: HWND, placement: Placement) -> bool {
     true
 }
 
-pub fn message_box(text: &str, error: bool) {
+pub fn message_box(owner: HWND, text: &str, error: bool) {
     let icon = if error { MB_ICONERROR } else { MB_ICONWARNING };
+    show_message(owner, text, MB_OK | icon);
+}
+
+pub fn ask_yes_no(owner: HWND, text: &str) -> bool {
+    show_message(owner, text, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES
+}
+
+fn show_message(owner: HWND, text: &str, style: MESSAGEBOX_STYLE) -> i32 {
     let text = wide(text);
     let caption = wide("GameSuspend");
     unsafe {
         MessageBoxW(
-            std::ptr::null_mut(),
+            owner,
             text.as_ptr(),
             caption.as_ptr(),
-            MB_OK | icon | MB_SETFOREGROUND,
+            style | MB_SETFOREGROUND,
+        )
+    }
+}
+
+/// Icon resource at the system size for small (title bar, tray) or large icons.
+pub fn load_icon(id: u16, small: bool) -> HICON {
+    let (cx, cy) = if small {
+        (SM_CXSMICON, SM_CYSMICON)
+    } else {
+        (SM_CXICON, SM_CYICON)
+    };
+    unsafe {
+        LoadImageW(
+            GetModuleHandleW(std::ptr::null()),
+            id as usize as *const u16,
+            IMAGE_ICON,
+            GetSystemMetrics(cx),
+            GetSystemMetrics(cy),
+            LR_DEFAULTCOLOR,
+        )
+    }
+}
+
+/// Opens a file in its default application (Notepad for .log).
+pub fn open_file(path: &Path) {
+    let verb = wide("open");
+    let file = wide(&path.to_string_lossy());
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
         )
     };
 }

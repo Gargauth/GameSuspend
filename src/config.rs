@@ -1,42 +1,11 @@
-//! `settings.ini` next to the executable: defaults, parsing and validation.
+//! `settings.ini` next to the executable: defaults, parsing, validation and saving.
+//! The settings window writes it; manual edits are read on the next start.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::Path;
 
-/// Written when `settings.ini` does not exist yet.
-pub const DEFAULT_INI: &str = "\
-; GameSuspend - nastavení. Po změně použij „Znovu načíst nastavení“ v menu ikony v oznamovací oblasti.\r
-\r
-[Hotkeys]\r
-; Syntaxe jako v AutoHotkey: ^ = Ctrl, ! = Alt, + = Shift, # = Win\r
-; Klávesy: Pause, ScrollLock, F1-F24, Insert, Home, End, PgUp, PgDn, A-Z, 0-9,\r
-; Numpad0-9, ... nebo kód virtuální klávesy jako vk13.\r
-ToggleKey=Pause\r
-EmergencyKey=^!Pause\r
-\r
-[Timing]\r
-; Pauza mezi minimalizací okna a uspáním procesu (ms, 0-10000).\r
-; Kratší = rychlejší, ale hra nemusí stihnout dokončit minimalizaci\r
-; a odchod z fullscreenu - pak se po probuzení sekne.\r
-MinimizeDelayMs=350\r
-; Pauza mezi probuzením procesu a obnovením okna (ms, 0-10000).\r
-ResumeDelayMs=250\r
-\r
-[Behavior]\r
-; 1 = minimalizovat okno před uspáním (doporučeno, uvolní obrazovku\r
-;     a u exclusive fullscreen vrátí plochu). 0 = nechat okno být.\r
-MinimizeWindow=1\r
-; 1 = zobrazovat oznámení, 0 = pracovat potichu.\r
-ShowTrayTips=1\r
-\r
-[Blacklist]\r
-; Další procesy, které se nikdy nesmí uspat, oddělené čárkou.\r
-; Systémové procesy (explorer.exe, dwm.exe, csrss.exe, ...) jsou\r
-; zablokované napevno v programu a tenhle seznam je jen rozšiřuje.\r
-Extra=\r
-";
-
-const MAX_DELAY_MS: u32 = 10_000;
+pub const MAX_DELAY_MS: u32 = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -65,17 +34,46 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Loads `path`, creating it with [`DEFAULT_INI`] when missing.
+    /// Loads `path`, creating it with the defaults when missing.
     /// An unreadable file yields the defaults so the app always starts.
     pub fn load_or_create(path: &Path) -> Config {
         match std::fs::read(path) {
             Ok(bytes) => Config::parse(&decode(&bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let _ = std::fs::write(path, DEFAULT_INI);
-                Config::default()
+                let config = Config::default();
+                let _ = config.save(path);
+                config
             }
             Err(_) => Config::default(),
         }
+    }
+
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::write(path, self.to_ini())
+    }
+
+    pub fn to_ini(&self) -> String {
+        let mut ini = String::from(
+            "; GameSuspend settings. Easier to change in the Settings window\r\n\
+             ; (right-click the GameSuspend icon next to the clock).\r\n\
+             ; Hotkeys: ^ = Ctrl, ! = Alt, + = Shift, # = Win, e.g. ^!Pause.\r\n",
+        );
+        let flag = |b: bool| u8::from(b);
+        let _ = write!(
+            ini,
+            "\r\n[Hotkeys]\r\nToggleKey={}\r\nEmergencyKey={}\r\n\
+             \r\n[Timing]\r\nMinimizeDelayMs={}\r\nResumeDelayMs={}\r\n\
+             \r\n[Behavior]\r\nMinimizeWindow={}\r\nShowTrayTips={}\r\n\
+             \r\n[Blacklist]\r\nExtra={}\r\n",
+            self.toggle_key,
+            self.emergency_key,
+            self.minimize_delay_ms,
+            self.resume_delay_ms,
+            flag(self.minimize_window),
+            flag(self.show_tray_tips),
+            self.extra_blacklist.join(", "),
+        );
+        ini
     }
 
     /// Missing or invalid values fall back to their defaults individually.
@@ -105,15 +103,28 @@ impl Config {
             resume_delay_ms: delay_or("timing", "resumedelayms", def.resume_delay_ms),
             minimize_window: flag_or("behavior", "minimizewindow", def.minimize_window),
             show_tray_tips: flag_or("behavior", "showtraytips", def.show_tray_tips),
-            extra_blacklist: ini
-                .get("blacklist", "extra")
-                .unwrap_or("")
-                .split(',')
-                .map(|name| name.trim().to_lowercase())
-                .filter(|name| !name.is_empty())
-                .collect(),
+            extra_blacklist: parse_blacklist(ini.get("blacklist", "extra").unwrap_or("")),
         }
     }
+}
+
+/// Program names separated by commas or semicolons, lowercased and deduplicated.
+/// A name without an extension gets `.exe`, so "discord" works as expected.
+pub fn parse_blacklist(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for name in text.split([',', ';']) {
+        let mut name = name.trim().to_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        if !name.contains('.') {
+            name.push_str(".exe");
+        }
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// Accepts UTF-8 (with or without BOM) and UTF-16 LE with BOM, which is what
@@ -167,8 +178,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_ini_parses_to_defaults() {
-        assert_eq!(Config::parse(DEFAULT_INI), Config::default());
+    fn saved_ini_parses_back_to_the_same_config() {
+        let custom = Config {
+            toggle_key: "^F9".into(),
+            emergency_key: "+#vkBA".into(),
+            minimize_delay_ms: 0,
+            resume_delay_ms: 10_000,
+            minimize_window: false,
+            show_tray_tips: false,
+            extra_blacklist: vec!["discord.exe".into(), "obs64.exe".into()],
+        };
+        for config in [Config::default(), custom] {
+            assert_eq!(Config::parse(&config.to_ini()), config);
+        }
     }
 
     #[test]
@@ -204,9 +226,11 @@ mod tests {
     }
 
     #[test]
-    fn extra_blacklist_is_split_trimmed_and_lowercased() {
-        let cfg = Config::parse("[Blacklist]\nExtra= Discord.exe ,, OBS64.EXE,\n");
-        assert_eq!(cfg.extra_blacklist, ["discord.exe", "obs64.exe"]);
+    fn blacklist_is_split_normalized_and_deduplicated() {
+        assert_eq!(
+            parse_blacklist(" Discord.exe ,, OBS64.EXE; steam ,discord.EXE,"),
+            ["discord.exe", "obs64.exe", "steam.exe"]
+        );
     }
 
     #[test]

@@ -1,9 +1,9 @@
 [package]
 name = "gamesuspend"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Uspí a probudí hru v popředí jednou klávesovou zkratkou."
+description = "Suspends and resumes the foreground game with one hotkey."
 license = "MIT"
 repository = "https://github.com/Gargauth/GameSuspend"
 publish = false
@@ -14,8 +14,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_Graphics_Gdi",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_UI_Controls",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

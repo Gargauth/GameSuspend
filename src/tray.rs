@@ -1,24 +1,19 @@
 //! Notification-area icon, balloon notifications and the context menu.
 
 use windows_sys::Win32::Foundation::{HWND, POINT};
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_LARGE_ICON, NIIF_USER, NIM_ADD, NIM_DELETE,
     NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetSystemMetrics, HICON, IMAGE_ICON,
-    LR_DEFAULTCOLOR, LoadImageW, MF_GRAYED, MF_SEPARATOR, MF_STRING, PostMessageW, SM_CXICON,
-    SM_CXSMICON, SM_CYICON, SM_CYSMICON, SYSTEM_METRICS_INDEX, SetForegroundWindow,
-    SetMenuDefaultItem, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
-    WM_NULL,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, HICON, MF_GRAYED, MF_SEPARATOR,
+    MF_STRING, PostMessageW, SetForegroundWindow, SetMenuDefaultItem, TPM_NONOTIFY, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_NULL,
 };
 
+use crate::ids::{IDI_APP, IDI_SUSPENDED};
 use crate::wide;
-
-/// Resource IDs assigned in build.rs.
-const ICON_IDLE: u16 = 1;
-const ICON_SUSPENDED: u16 = 2;
+use crate::window::load_icon;
 
 /// Callback message for mouse events on the tray icon.
 pub const WM_TRAY: u32 = WM_APP + 1;
@@ -38,8 +33,8 @@ struct Icons {
 impl Icons {
     fn load(id: u16) -> Icons {
         Icons {
-            small: load_icon(id, SM_CXSMICON, SM_CYSMICON),
-            large: load_icon(id, SM_CXICON, SM_CYICON),
+            small: load_icon(id, true),
+            large: load_icon(id, false),
         }
     }
 }
@@ -86,8 +81,8 @@ impl Tray {
     pub fn new(hwnd: HWND) -> Tray {
         Tray {
             hwnd,
-            idle: Icons::load(ICON_IDLE),
-            suspended: Icons::load(ICON_SUSPENDED),
+            idle: Icons::load(IDI_APP),
+            suspended: Icons::load(IDI_SUSPENDED),
         }
     }
 
@@ -135,19 +130,6 @@ impl Tray {
 
     pub fn remove(&self) {
         unsafe { Shell_NotifyIconW(NIM_DELETE, &self.data()) };
-    }
-}
-
-fn load_icon(id: u16, cx: SYSTEM_METRICS_INDEX, cy: SYSTEM_METRICS_INDEX) -> HICON {
-    unsafe {
-        LoadImageW(
-            GetModuleHandleW(std::ptr::null()),
-            id as usize as *const u16,
-            IMAGE_ICON,
-            GetSystemMetrics(cx),
-            GetSystemMetrics(cy),
-            LR_DEFAULTCOLOR,
-        )
     }
 }
 

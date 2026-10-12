@@ -63,10 +63,10 @@ pub fn open(pid: u32, access: PROCESS_ACCESS_RIGHTS) -> Result<OwnedHandle, u32>
 /// Suspends or resumes every thread of `pid`. Needs only PROCESS_SUSPEND_RESUME.
 pub fn nt_call(pid: u32, op: NtOp) -> Result<(), String> {
     if pid == 0 {
-        return Err("neplatný PID (0)".into());
+        return Err("invalid PID (0)".into());
     }
     let process = open(pid, PROCESS_SUSPEND_RESUME)
-        .map_err(|e| format!("OpenProcess selhalo, WinErr {e} ({})", win_error_text(e)))?;
+        .map_err(|e| format!("OpenProcess failed, WinErr {e} ({})", win_error_text(e)))?;
     let handle = process.as_raw_handle();
     let status = unsafe {
         match op {
@@ -76,7 +76,7 @@ pub fn nt_call(pid: u32, op: NtOp) -> Result<(), String> {
     };
     if status != 0 {
         return Err(format!(
-            "{} vrátilo NTSTATUS 0x{:08X}",
+            "{} returned NTSTATUS 0x{:08X}",
             op.name(),
             status as u32
         ));
@@ -86,11 +86,11 @@ pub fn nt_call(pid: u32, op: NtOp) -> Result<(), String> {
 
 fn win_error_text(code: u32) -> &'static str {
     match code {
-        5 => "přístup odepřen - chybí práva správce nebo to blokuje anticheat",
-        6 => "neplatný handle",
-        87 => "neplatný parametr - proces už pravděpodobně neexistuje",
-        299 => "částečně dokončeno",
-        _ => "neznámá chyba",
+        5 => "access denied - needs administrator rights or blocked by anti-cheat",
+        6 => "invalid handle",
+        87 => "invalid parameter - the process has probably exited",
+        299 => "partially completed",
+        _ => "unknown error",
     }
 }
 
@@ -126,22 +126,22 @@ pub fn current_pid() -> u32 {
 /// Why `pid` must not be suspended, or `None` when it is allowed.
 pub fn block_reason(pid: u32, own_pid: u32, exe: &str, extra: &[String]) -> Option<&'static str> {
     if pid == own_pid {
-        return Some("to je GameSuspend sám");
+        return Some("that is GameSuspend itself");
     }
     if pid <= 4 {
-        return Some("systémový proces");
+        return Some("system process");
     }
     let exe = exe.to_lowercase();
     if HARD_BLACKLIST.contains(&exe.as_str()) {
-        return Some("systémový proces na pevném blacklistu");
+        return Some("system process on the built-in blacklist");
     }
     // A suspended process holding a low-level keyboard hook (AutoHotkey) stalls
     // keyboard input for the whole system.
     if exe.contains("autohotkey") {
-        return Some("AutoHotkey proces");
+        return Some("AutoHotkey process");
     }
     if extra.contains(&exe) {
-        return Some("proces na uživatelském blacklistu v settings.ini");
+        return Some("on your \"Never suspend\" list in Settings");
     }
     None
 }
@@ -185,7 +185,7 @@ mod tests {
     fn rejects_invalid_and_missing_pids() {
         assert!(nt_call(0, NtOp::Suspend).is_err());
         let err = nt_call(0xFFFF_FFF0, NtOp::Suspend).unwrap_err();
-        assert!(err.starts_with("OpenProcess selhalo"), "{err}");
+        assert!(err.starts_with("OpenProcess failed"), "{err}");
         assert_eq!(exe_name(0xFFFF_FFF0), None);
     }
 

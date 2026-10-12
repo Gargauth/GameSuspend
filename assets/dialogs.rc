@@ -1,0 +1,64 @@
+#pragma code_page(65001)
+#include <windows.h>
+#include <commctrl.h>
+#include "assets/resource.h"
+
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+IDD_SETTINGS DIALOGEX 0, 0, 280, 293
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+EXSTYLE WS_EX_APPWINDOW
+CAPTION "GameSuspend – Settings"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    ICON            IDI_APP, IDC_STATIC, 10, 8, 21, 20
+    LTEXT           "Press the hotkey in a game to put it to sleep. It stops using CPU and GPU but keeps your progress. Press it again to wake it up.",
+                    IDC_STATIC, 38, 8, 235, 26
+
+    GROUPBOX        "Hotkeys", IDC_STATIC, 7, 38, 266, 66
+    LTEXT           "Suspend / resume game:", IDC_STATIC, 15, 54, 100, 8
+    EDITTEXT        IDC_HK_TOGGLE, 120, 51, 145, 14, ES_AUTOHSCROLL
+    LTEXT           "Emergency resume:", IDC_STATIC, 15, 72, 100, 8
+    EDITTEXT        IDC_HK_EMERGENCY, 120, 69, 145, 14, ES_AUTOHSCROLL
+    LTEXT           "Click a field and press the new key combination.", IDC_STATIC, 120, 88, 150, 8
+
+    GROUPBOX        "Behavior", IDC_STATIC, 7, 110, 266, 56
+    AUTOCHECKBOX    "Minimize the game window before suspending", IDC_MINIMIZE, 15, 123, 250, 10
+    AUTOCHECKBOX    "Show notifications", IDC_NOTIFY, 15, 137, 250, 10
+    AUTOCHECKBOX    "Start GameSuspend when I sign in to Windows", IDC_AUTOSTART, 15, 151, 250, 10
+
+    GROUPBOX        "Never suspend these programs", IDC_STATIC, 7, 172, 266, 36
+    EDITTEXT        IDC_BLACKLIST, 15, 186, 250, 14, ES_AUTOHSCROLL
+
+    GROUPBOX        "Advanced", IDC_STATIC, 7, 214, 266, 50
+    LTEXT           "Wait after minimizing, before suspending:", IDC_STATIC, 15, 230, 155, 8
+    EDITTEXT        IDC_MIN_DELAY, 175, 227, 50, 14, ES_NUMBER | ES_RIGHT
+    CONTROL         "", IDC_MIN_DELAY_SPIN, "msctls_updown32",
+                    UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_AUTOBUDDY | UDS_ARROWKEYS | UDS_NOTHOUSANDS,
+                    0, 0, 0, 0
+    LTEXT           "ms", IDC_STATIC, 230, 230, 30, 8
+    LTEXT           "Wait after resuming, before restoring the window:", IDC_STATIC, 15, 247, 158, 8
+    EDITTEXT        IDC_RESUME_DELAY, 175, 244, 50, 14, ES_NUMBER | ES_RIGHT
+    CONTROL         "", IDC_RESUME_DELAY_SPIN, "msctls_updown32",
+                    UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_AUTOBUDDY | UDS_ARROWKEYS | UDS_NOTHOUSANDS,
+                    0, 0, 0, 0
+    LTEXT           "ms", IDC_STATIC, 230, 247, 30, 8
+
+    PUSHBUTTON      "History…", IDC_SHOW_HISTORY, 7, 272, 60, 14
+    DEFPUSHBUTTON   "Save", IDOK, 164, 272, 52, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 221, 272, 52, 14
+END
+
+IDD_HISTORY DIALOGEX 0, 0, 420, 240
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+EXSTYLE WS_EX_APPWINDOW
+CAPTION "GameSuspend – History"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    CONTROL         "", IDC_HISTORY_LIST, "SysListView32",
+                    LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | WS_BORDER | WS_TABSTOP,
+                    7, 7, 406, 204
+    PUSHBUTTON      "Open as text", IDC_OPEN_LOG, 7, 219, 70, 14
+    PUSHBUTTON      "Clear history", IDC_CLEAR_LOG, 82, 219, 70, 14
+    DEFPUSHBUTTON   "Close", IDCANCEL, 361, 219, 52, 14
+END

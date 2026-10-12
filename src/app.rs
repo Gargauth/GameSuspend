@@ -1,4 +1,4 @@
-//! Application state and actions: suspend, resume, emergency resume, reload, exit.
+//! Application state and actions: suspend, resume, emergency resume, settings, exit.
 //!
 //! CRITICAL ORDER OF OPERATIONS:
 //!   suspend = minimize window -> wait -> suspend process
@@ -20,7 +20,7 @@ use crate::config::Config;
 use crate::process::{self, NtOp};
 use crate::tray::{MenuItem, Tray};
 use crate::window::{self, Placement};
-use crate::{hotkey, log};
+use crate::{autostart, hotkey, log};
 
 /// PID of the currently suspended process, readable without the app state so
 /// that the panic hook and exit fallbacks can always resume it.
@@ -35,10 +35,9 @@ const HK_EMERGENCY_ALT: i32 = 4;
 const ID_STATUS: u32 = 1;
 const ID_TOGGLE: u32 = 2;
 const ID_EMERGENCY: u32 = 3;
-const ID_OPEN_LOG: u32 = 4;
-const ID_OPEN_SETTINGS: u32 = 5;
-const ID_RELOAD: u32 = 6;
-const ID_EXIT: u32 = 7;
+const ID_SETTINGS: u32 = 4;
+const ID_HISTORY: u32 = 5;
+const ID_EXIT: u32 = 6;
 
 struct Suspended {
     pid: u32,
@@ -47,9 +46,11 @@ struct Suspended {
     placement: Placement,
 }
 
-pub enum MenuEffect {
+/// Follow-up work that must run after the app state is released (it opens windows).
+pub enum Effect {
     None,
-    Open(PathBuf),
+    Settings,
+    History,
     Exit,
 }
 
@@ -57,6 +58,7 @@ pub struct App {
     hwnd: HWND,
     ini: PathBuf,
     cfg: Config,
+    first_run: bool,
     state: Option<Suspended>,
     /// Last suspended process for the emergency hotkey; kept after a normal resume.
     last: Option<(u32, String)>,
@@ -68,6 +70,7 @@ impl App {
         let ini = crate::APP_DIR.join("settings.ini");
         App {
             hwnd,
+            first_run: !ini.exists(),
             cfg: Config::load_or_create(&ini),
             ini,
             state: None,
@@ -76,57 +79,81 @@ impl App {
         }
     }
 
-    /// Registers hotkeys and shows the tray icon. Fails only when the main
-    /// hotkey cannot be registered, since the app is useless without it.
-    pub fn start(&mut self) -> Result<(), String> {
-        let (toggle, emergency) = self.register_hotkeys();
-        if let Err(e) = toggle {
-            return Err(format!(
-                "Nelze zaregistrovat zkratku pro uspání „{}“:\n{e}\n\nOprav položku ToggleKey v settings.ini.",
-                self.cfg.toggle_key
-            ));
-        }
-        if let Err(e) = emergency {
-            window::message_box(
-                &format!(
-                    "Nelze zaregistrovat nouzovou zkratku „{}“:\n{e}\n\nOprav položku EmergencyKey v settings.ini.",
-                    self.cfg.emergency_key
-                ),
-                false,
-            );
-        }
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
+    /// Registers hotkeys and shows the tray icon. Asks for the settings window
+    /// on the first run and when a hotkey cannot be used.
+    pub fn start(&mut self) -> Effect {
+        let hotkeys = self.register_hotkeys(&self.cfg);
         self.update_tray();
         log::write(
             "START",
             process::current_pid(),
             "GameSuspend.exe",
             &format!(
-                "OK (toggle={}, nouzové={})",
+                "OK (toggle={}, emergency={})",
                 self.cfg.toggle_key, self.cfg.emergency_key
             ),
         );
-        self.notify(
-            "GameSuspend běží",
-            &format!(
-                "{} = uspat/probudit hru v popředí\n{} = nouzové probuzení",
-                self.cfg.toggle_key, self.cfg.emergency_key
+        match &hotkeys {
+            Ok(()) => self.notify(
+                "GameSuspend is running",
+                &format!(
+                    "{} = suspend/resume the foreground game\n{} = emergency resume",
+                    hotkey::display(&self.cfg.toggle_key),
+                    hotkey::display(&self.cfg.emergency_key)
+                ),
             ),
-        );
-        Ok(())
+            Err(e) => window::message_box(
+                std::ptr::null_mut(),
+                &format!("Some hotkeys can't be used:\n\n{e}\n\nPick different ones in Settings."),
+                false,
+            ),
+        }
+        if self.first_run || hotkeys.is_err() {
+            Effect::Settings
+        } else {
+            Effect::None
+        }
     }
 
-    fn register_hotkeys(&self) -> (Result<(), String>, Result<(), String>) {
-        (
-            self.register_hotkey(HK_TOGGLE, HK_TOGGLE_ALT, &self.cfg.toggle_key),
-            self.register_hotkey(HK_EMERGENCY, HK_EMERGENCY_ALT, &self.cfg.emergency_key),
-        )
+    /// Registers both hotkeys of `cfg`; the error lists every one that failed.
+    fn register_hotkeys(&self, cfg: &Config) -> Result<(), String> {
+        let errors: Vec<String> = [
+            (
+                "Suspend / resume",
+                &cfg.toggle_key,
+                HK_TOGGLE,
+                HK_TOGGLE_ALT,
+            ),
+            (
+                "Emergency resume",
+                &cfg.emergency_key,
+                HK_EMERGENCY,
+                HK_EMERGENCY_ALT,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(what, spec, id, alt_id)| {
+            self.register_hotkey(id, alt_id, spec)
+                .err()
+                .map(|e| format!("{what} ({}): {e}", hotkey::display(spec)))
+        })
+        .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("\n"))
+        }
     }
 
     fn register_hotkey(&self, id: i32, alt_id: i32, spec: &str) -> Result<(), String> {
         let key = hotkey::parse(spec)?;
         let modifiers = key.modifiers | MOD_NOREPEAT;
         if unsafe { RegisterHotKey(self.hwnd, id, modifiers, key.vk) } == 0 {
-            return Err("zkratku už používá jiná aplikace".into());
+            return Err("another app already uses this hotkey".into());
         }
         if let Some(alt) = key.alt_vk {
             // Best effort: the primary registration already works.
@@ -139,6 +166,47 @@ impl App {
         for id in [HK_TOGGLE, HK_TOGGLE_ALT, HK_EMERGENCY, HK_EMERGENCY_ALT] {
             unsafe { UnregisterHotKey(self.hwnd, id) };
         }
+    }
+
+    /// While the settings window is open its hotkey fields must receive the keys.
+    pub fn pause_hotkeys(&self) {
+        self.unregister_hotkeys();
+    }
+
+    pub fn resume_hotkeys(&self) -> Result<(), String> {
+        self.register_hotkeys(&self.cfg)
+            .map_err(|e| format!("Some hotkeys couldn't be turned back on:\n\n{e}"))
+    }
+
+    /// Applies and saves settings from the settings window. On error nothing
+    /// changes and the hotkeys stay paused, so the window can stay open.
+    pub fn apply_settings(&mut self, cfg: Config, autostart: bool) -> Result<(), String> {
+        self.unregister_hotkeys();
+        if let Err(e) = self.register_hotkeys(&cfg) {
+            self.unregister_hotkeys();
+            return Err(format!(
+                "These hotkeys can't be used:\n\n{e}\n\nPick different ones."
+            ));
+        }
+        let saved = cfg
+            .save(&self.ini)
+            .map_err(|e| format!("Can't save settings to {}:\n{e}", self.ini.display()));
+        if let Err(e) = saved.and_then(|()| autostart::set(autostart)) {
+            self.unregister_hotkeys();
+            return Err(e);
+        }
+        self.cfg = cfg;
+        self.update_tray();
+        log::write(
+            "SETTINGS",
+            0,
+            "",
+            &format!(
+                "OK (toggle={}, emergency={})",
+                self.cfg.toggle_key, self.cfg.emergency_key
+            ),
+        );
+        Ok(())
     }
 
     pub fn on_hotkey(&mut self, id: i32) {
@@ -159,25 +227,27 @@ impl App {
 
     fn suspend(&mut self) {
         let Some(hwnd) = window::foreground() else {
-            self.notify("Uspání", "Nenalezeno žádné aktivní okno.");
-            log::write("SUSPEND", 0, "", "CHYBA: žádné aktivní okno");
+            self.notify("Suspend", "No active window found.");
+            log::write("SUSPEND", 0, "", "ERROR: no active window");
             return;
         };
         let pid = window::pid(hwnd);
         let Some(exe) = process::exe_name(pid) else {
-            self.notify("Uspání", "Nelze zjistit proces okna.");
-            log::write("SUSPEND", pid, "", "CHYBA: nelze zjistit proces okna");
+            self.notify("Suspend", "Can't determine the window's process.");
+            log::write(
+                "SUSPEND",
+                pid,
+                "",
+                "ERROR: can't determine the window's process",
+            );
             return;
         };
 
         // Safety checks before anything touches the window.
         let own_pid = process::current_pid();
         if let Some(reason) = process::block_reason(pid, own_pid, &exe, &self.cfg.extra_blacklist) {
-            self.notify(
-                "Uspání zablokováno",
-                &format!("{exe} (PID {pid})\n{reason}"),
-            );
-            log::write("SUSPEND", pid, &exe, &format!("BLOKOVÁNO: {reason}"));
+            self.notify("Suspend blocked", &format!("{exe}\n{reason}"));
+            log::write("SUSPEND", pid, &exe, &format!("BLOCKED: {reason}"));
             return;
         }
 
@@ -197,12 +267,12 @@ impl App {
                 window::restore(hwnd, placement);
             }
             self.notify(
-                "Uspání se nepovedlo",
+                "Suspend failed",
                 &format!(
-                    "{exe} (PID {pid})\n{err}\nOkno bylo vráceno zpět.\nZkus spustit GameSuspend jako správce."
+                    "{exe}\n{err}\nThe window was restored. Try running GameSuspend as administrator."
                 ),
             );
-            log::write("SUSPEND", pid, &exe, &format!("CHYBA: {err}"));
+            log::write("SUSPEND", pid, &exe, &format!("ERROR: {err}"));
             return;
         }
 
@@ -219,13 +289,13 @@ impl App {
             "SUSPEND",
             pid,
             &exe,
-            &format!("OK (okno: {})", placement.label()),
+            &format!("OK (window: {})", placement.label()),
         );
         self.notify(
-            "Uspáno",
+            "Suspended",
             &format!(
-                "{exe} (PID {pid})\n{title}\n{} = probudit",
-                self.cfg.toggle_key
+                "{exe}\n{title}\n{} = resume",
+                hotkey::display(&self.cfg.toggle_key)
             ),
         );
     }
@@ -235,11 +305,8 @@ impl App {
 
         // Step 1: resume so the process can handle window messages again.
         if let Err(err) = process::nt_call(st.pid, NtOp::Resume) {
-            log::write("RESUME", st.pid, &st.exe, &format!("CHYBA: {err}"));
-            self.notify(
-                "Probuzení selhalo",
-                &format!("{} (PID {})\n{err}", st.exe, st.pid),
-            );
+            log::write("RESUME", st.pid, &st.exe, &format!("ERROR: {err}"));
+            self.notify("Resume failed", &format!("{}\n{err}", st.exe));
             if process::exists(st.pid) {
                 self.state = Some(st);
             } else {
@@ -259,9 +326,9 @@ impl App {
             "RESUME",
             st.pid,
             &st.exe,
-            &format!("OK (okno: {})", st.placement.label()),
+            &format!("OK (window: {})", st.placement.label()),
         );
-        self.notify("Probuzeno", &format!("{} (PID {})", st.exe, st.pid));
+        self.notify("Resumed", &st.exe);
     }
 
     /// Resumes the last known PID regardless of the internal state: the rescue
@@ -272,8 +339,8 @@ impl App {
             (None, last) => last.clone(),
         };
         let Some((pid, exe)) = target else {
-            self.notify("Nouzové probuzení", "Není zapamatován žádný proces.");
-            log::write("EMERGENCY", 0, "", "CHYBA: žádný zapamatovaný PID");
+            self.notify("Emergency resume", "There is no suspended game to resume.");
+            log::write("EMERGENCY", 0, "", "ERROR: no remembered PID");
             return;
         };
 
@@ -285,14 +352,11 @@ impl App {
                     window::restore(st.hwnd, st.placement);
                 }
                 self.clear_suspended();
-                self.notify("Nouzově probuzeno", &format!("{exe} (PID {pid})"));
+                self.notify("Resumed (emergency)", &exe);
             }
             Err(err) => {
-                log::write("EMERGENCY", pid, &exe, &format!("CHYBA: {err}"));
-                self.notify(
-                    "Nouzové probuzení selhalo",
-                    &format!("{exe} (PID {pid})\n{err}"),
-                );
+                log::write("EMERGENCY", pid, &exe, &format!("ERROR: {err}"));
+                self.notify("Emergency resume failed", &format!("{exe}\n{err}"));
                 if !process::exists(pid) {
                     self.state = None;
                     self.clear_suspended();
@@ -306,50 +370,14 @@ impl App {
         self.update_tray();
     }
 
-    /// Tray double-click: resume only. Suspending from the tray would target the
-    /// taskbar, which is the foreground window at that moment.
-    pub fn on_tray_double_click(&mut self) {
+    /// Tray double-click: resume a suspended game, otherwise open the settings.
+    /// Suspending from the tray would target the taskbar, the foreground window then.
+    pub fn on_tray_double_click(&mut self) -> Effect {
         if self.state.is_some() {
             self.resume();
-        }
-    }
-
-    fn reload(&mut self) {
-        if self.state.is_some() {
-            self.notify("Nelze znovu načíst", "Nejdřív probuď uspaný proces.");
-            return;
-        }
-        self.unregister_hotkeys();
-        self.cfg = Config::load_or_create(&self.ini);
-        let (toggle, emergency) = self.register_hotkeys();
-        self.update_tray();
-
-        let errors: Vec<String> = [
-            ("ToggleKey", &self.cfg.toggle_key, toggle),
-            ("EmergencyKey", &self.cfg.emergency_key, emergency),
-        ]
-        .into_iter()
-        .filter_map(|(name, key, res)| res.err().map(|e| format!("{name} „{key}“: {e}")))
-        .collect();
-
-        if errors.is_empty() {
-            log::write("RELOAD", 0, "", "OK");
-            self.notify(
-                "Nastavení načteno",
-                &format!(
-                    "{} = uspat/probudit\n{} = nouzové probuzení",
-                    self.cfg.toggle_key, self.cfg.emergency_key
-                ),
-            );
+            Effect::None
         } else {
-            log::write("RELOAD", 0, "", &format!("CHYBA: {}", errors.join("; ")));
-            window::message_box(
-                &format!(
-                    "Některé zkratky nejdou zaregistrovat:\n\n{}",
-                    errors.join("\n")
-                ),
-                true,
-            );
+            Effect::Settings
         }
     }
 
@@ -358,8 +386,8 @@ impl App {
     pub fn shutdown(&mut self, reason: &str) {
         if let Some(st) = self.state.take() {
             let result = match process::nt_call(st.pid, NtOp::Resume) {
-                Ok(()) => format!("OK (důvod ukončení: {reason})"),
-                Err(err) => format!("CHYBA: {err} (důvod ukončení: {reason})"),
+                Ok(()) => format!("OK (exit reason: {reason})"),
+                Err(err) => format!("ERROR: {err} (exit reason: {reason})"),
             };
             SUSPENDED_PID.store(0, Ordering::SeqCst);
             log::write("EXIT-RESUME", st.pid, &st.exe, &result);
@@ -370,10 +398,10 @@ impl App {
 
     pub fn update_tray(&self) {
         let tip = match &self.state {
-            Some(st) => format!("GameSuspend – USPÁNO: {} (PID {})", st.exe, st.pid),
+            Some(st) => format!("GameSuspend – suspended: {}", st.exe),
             None => format!(
-                "GameSuspend – nečinný ({} = uspat hru v popředí)",
-                self.cfg.toggle_key
+                "GameSuspend – {} suspends the foreground game",
+                hotkey::display(&self.cfg.toggle_key)
             ),
         };
         self.tray.show(self.state.is_some(), &tip);
@@ -387,22 +415,17 @@ impl App {
     }
 
     pub fn menu_items(&self) -> Vec<MenuItem> {
+        let toggle_key = hotkey::display(&self.cfg.toggle_key);
+        let suspended = self.state.is_some();
         let (status, toggle) = match &self.state {
             Some(st) => (
-                format!("Stav: USPÁNO – {} (PID {})", st.exe, st.pid),
-                MenuItem::new(
-                    ID_TOGGLE,
-                    format!("Probudit {}\t{}", st.exe, self.cfg.toggle_key),
-                )
-                .default_item(true),
+                format!("Suspended: {}", st.exe),
+                MenuItem::new(ID_TOGGLE, format!("Resume game\t{toggle_key}")).default_item(true),
             ),
             None => (
-                "Stav: nečinný".to_string(),
-                MenuItem::new(
-                    ID_TOGGLE,
-                    format!("Uspat hru v popředí\t{}", self.cfg.toggle_key),
-                )
-                .enabled(false),
+                "Ready – press the hotkey in a game".to_string(),
+                MenuItem::new(ID_TOGGLE, format!("Suspend foreground game\t{toggle_key}"))
+                    .enabled(false),
             ),
         };
         vec![
@@ -411,27 +434,28 @@ impl App {
             toggle,
             MenuItem::new(
                 ID_EMERGENCY,
-                format!("Nouzové probuzení\t{}", self.cfg.emergency_key),
+                format!(
+                    "Emergency resume\t{}",
+                    hotkey::display(&self.cfg.emergency_key)
+                ),
             ),
             MenuItem::separator(),
-            MenuItem::new(ID_OPEN_LOG, "Otevřít log").enabled(log::PATH.exists()),
-            MenuItem::new(ID_OPEN_SETTINGS, "Otevřít nastavení"),
-            MenuItem::new(ID_RELOAD, "Znovu načíst nastavení"),
+            MenuItem::new(ID_SETTINGS, "Settings…").default_item(!suspended),
+            MenuItem::new(ID_HISTORY, "History…"),
             MenuItem::separator(),
-            MenuItem::new(ID_EXIT, "Ukončit"),
+            MenuItem::new(ID_EXIT, "Exit"),
         ]
     }
 
-    pub fn on_menu(&mut self, id: u32) -> MenuEffect {
+    pub fn on_menu(&mut self, id: u32) -> Effect {
         match id {
             ID_TOGGLE => self.toggle(),
             ID_EMERGENCY => self.emergency(),
-            ID_OPEN_LOG => return MenuEffect::Open(log::PATH.clone()),
-            ID_OPEN_SETTINGS => return MenuEffect::Open(self.ini.clone()),
-            ID_RELOAD => self.reload(),
-            ID_EXIT => return MenuEffect::Exit,
+            ID_SETTINGS => return Effect::Settings,
+            ID_HISTORY => return Effect::History,
+            ID_EXIT => return Effect::Exit,
             _ => {}
         }
-        MenuEffect::None
+        Effect::None
     }
 }
